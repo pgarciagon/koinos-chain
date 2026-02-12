@@ -5,7 +5,12 @@
 #include <koinos/chain/exceptions.hpp>
 #include <koinos/exception.hpp>
 #include <koinos/rpc/block_store/block_store_rpc.pb.h>
+#include <koinos/util/hex.hpp>
 #include <koinos/util/services.hpp>
+
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 
 constexpr std::size_t request_queue_size = 100;
 constexpr std::size_t block_queue_size   = 100;
@@ -163,6 +168,38 @@ void indexer::send_requests( uint64_t last_height, uint64_t batch_size )
 
 void indexer::process_requests( uint64_t last_height, uint64_t batch_size )
 {
+  // #region agent log
+  auto append_debug_log = []( const std::string& run_id,
+                              const std::string& hypothesis_id,
+                              const std::string& location,
+                              const std::string& message,
+                              const std::string& data_json ) {
+    try
+    {
+      const std::filesystem::path log_path( "/home/julian/koinos/.cursor/debug.log" );
+      if( !log_path.parent_path().empty() && !std::filesystem::exists( log_path.parent_path() ) )
+      {
+        std::filesystem::create_directories( log_path.parent_path() );
+      }
+
+      std::ofstream log_file( log_path, std::ios::app );
+      if( log_file.is_open() )
+      {
+        const auto ts = std::chrono::duration_cast< std::chrono::milliseconds >(
+          std::chrono::system_clock::now().time_since_epoch() ).count();
+        log_file << "{\"runId\":\"" << run_id
+                 << "\",\"hypothesisId\":\"" << hypothesis_id
+                 << "\",\"location\":\"" << location
+                 << "\",\"message\":\"" << message
+                 << "\",\"data\":" << data_json
+                 << ",\"timestamp\":" << ts << "}\n";
+      }
+    }
+    catch( ... )
+    {}
+  };
+  // #endregion
+
   try
   {
     if( _stopped )
@@ -189,7 +226,27 @@ void indexer::process_requests( uint64_t last_height, uint64_t batch_size )
       return handle_error( "unexpected block store response" );
 
     for( uint64_t i = 0; i < resp.get_blocks_by_height().block_items_size(); i++ )
+    {
+      // #region agent log
+      const auto& item = resp.get_blocks_by_height().block_items( int( i ) );
+      const auto root_size = item.receipt().state_merkle_root().size();
+      if( root_size == 0 )
+      {
+        std::string data = "{";
+        data += "\"height\":" + std::to_string( item.block().header().height() ) + ",";
+        data += "\"receipt_state_merkle_root_size\":0,";
+        data += "\"block_id_hex\":\"0x" + util::to_hex( item.block().id() ) + "\"";
+        data += "}";
+        append_debug_log( "pre-fix",
+                          "H7",
+                          "indexer.cpp:process_requests(block_store_receipt_scan)",
+                          "Block store returned receipt with empty state_merkle_root",
+                          data );
+      }
+      // #endregion
+
       _block_queue.push( std::move( *resp.mutable_get_blocks_by_height()->mutable_block_items( i ) ) );
+    }
 
     boost::asio::post( std::bind( &indexer::send_requests,
                                   this,

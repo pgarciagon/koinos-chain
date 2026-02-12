@@ -93,6 +93,7 @@ int main( int argc, char** argv )
   chain::genesis_data genesis_data;
   bool reset, log_color, log_datetime, disable_pending_transaction_limit, verify_blocks;
   chain::fork_resolution_algorithm fork_algorithm;
+  std::optional< std::filesystem::path > logdir_path;
 
   try
   {
@@ -178,7 +179,6 @@ int main( int argc, char** argv )
     verify_blocks                     = util::get_option< bool >( VERIFY_BLOCKS_OPTION, VERIFY_BLOCKS_DEFAULT, args, chain_config, global_config );
     // clang-format on
 
-    std::optional< std::filesystem::path > logdir_path;
     if( !log_dir.empty() )
     {
       logdir_path = std::make_optional< std::filesystem::path >( log_dir );
@@ -263,6 +263,12 @@ int main( int argc, char** argv )
                                 syscall_bufsize,
                                 disable_pending_transaction_limit ? std::optional< uint64_t >()
                                                                   : pending_transaction_limit );
+
+  // Set log directory for debug file output
+  if( logdir_path.has_value() )
+  {
+    controller.set_log_directory( *logdir_path );
+  }
 
   try
   {

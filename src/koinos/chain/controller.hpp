@@ -37,6 +37,7 @@ public:
   open( const std::filesystem::path& p, const chain::genesis_data& data, fork_resolution_algorithm algo, bool reset );
   void close();
   void set_client( std::shared_ptr< mq::client > c );
+  void set_log_directory( const std::filesystem::path& log_dir );
 
   rpc::chain::submit_block_response
   submit_block( const rpc::chain::submit_block_request&,

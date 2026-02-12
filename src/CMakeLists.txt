@@ -38,7 +38,8 @@ target_link_libraries(
       Koinos::log
       Koinos::util
       Koinos::mq
-      vm_manager)
+      vm_manager
+      nlohmann_json::nlohmann_json)
 
 target_include_directories(
   chain
