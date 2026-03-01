@@ -12,7 +12,7 @@ FetchContent_MakeAvailable(koinos_cmake)
 include("${koinos_cmake_SOURCE_DIR}/Koinos.cmake")
 
 project(koinos_chain
-  VERSION 1.4.1
+  VERSION 1.4.2
   DESCRIPTION "Koinos Chain microservice"
   LANGUAGES CXX C)
 
