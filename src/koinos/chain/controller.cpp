@@ -424,8 +424,7 @@ apply_block_result controller_impl::apply_block( const protocol::block& block, c
     {
       rpc::block_store::block_store_request req;
       req.mutable_add_block()->mutable_block_to_add()->CopyFrom( block );
-      req.mutable_add_block()->mutable_receipt_to_add()->CopyFrom(
-        std::get< protocol::block_receipt >( ctx.receipt() ) );
+      req.mutable_add_block()->mutable_receipt_to_add()->CopyFrom( *res.receipt );
 
       auto future = _client->rpc( util::service::block_store,
                                   util::converter::as< std::string >( req ),
@@ -528,7 +527,7 @@ apply_block_result controller_impl::apply_block( const protocol::block& block, c
 
       broadcast::block_accepted ba;
       *ba.mutable_block()   = block;
-      *ba.mutable_receipt() = std::get< protocol::block_receipt >( ctx.receipt() );
+      *ba.mutable_receipt() = *res.receipt;
       ba.set_live( live );
       ba.set_head( new_head );
 
