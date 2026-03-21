@@ -19,7 +19,7 @@ This branch also bumps the chain version to `1.5.1`.
 
 This branch changes:
 
-- `koinos-chain` `1.4.1 -> 1.4.2`
+- `koinos-chain` `1.4.1 -> 1.5.1`
 
 The bump is justified as a patch release because the behavior change is a correctness fix in persisted receipt handling, not a protocol or API redesign.
 
