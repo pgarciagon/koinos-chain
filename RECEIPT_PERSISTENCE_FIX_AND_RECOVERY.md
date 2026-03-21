@@ -13,7 +13,7 @@ That means:
 
 For already-affected nodes, `chain.verify-blocks=true` is still required during reindex so that the node re-executes blocks instead of trusting persisted deltas.
 
-This branch also bumps the chain version to `1.4.2`.
+This branch also bumps the chain version to `1.5.1`.
 
 ## Version
 
