@@ -176,7 +176,7 @@ It only fixes the persistence bug at the point where the wrong receipt was being
 This branch is meant to stay clean and isolated relative to `master`:
 
 - rectification receipt persistence fix,
-- patch version bump to `1.4.2`,
+- patch version bump to `1.5.1`,
 - documentation for release and recovery context.
 
 That makes it suitable as the base for a focused PR against the main branch later.
