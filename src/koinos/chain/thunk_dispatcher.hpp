@@ -276,13 +276,14 @@ std::tuple< T, Ts... > message_to_tuple_impl( const google::protobuf::Message& m
 template< typename... Ts >
 std::tuple< std::decay_t< Ts >... > message_to_tuple( const google::protobuf::Message& msg )
 {
-  return message_to_tuple_impl< std::decay_t< Ts >... >( msg );
-}
-
-template<>
-inline std::tuple<> message_to_tuple<>( const google::protobuf::Message& )
-{
-  return std::tuple<>();
+  if constexpr( sizeof...( Ts ) == 0 )
+  {
+    return std::tuple<>();
+  }
+  else
+  {
+    return message_to_tuple_impl< std::decay_t< Ts >... >( msg );
+  }
 }
 
 /*

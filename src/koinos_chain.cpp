@@ -154,7 +154,7 @@ int main( int argc, char** argv )
 
     if( std::filesystem::exists( yaml_config ) )
     {
-      config        = YAML::LoadFile( yaml_config );
+      config        = YAML::LoadFile( yaml_config.string() );
       global_config = config[ "global" ];
       chain_config  = config[ util::service::chain ];
     }
