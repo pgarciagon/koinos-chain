@@ -1953,4 +1953,121 @@ BOOST_AUTO_TEST_CASE( apply_block_delta_kfs_tombstone_test )
   }
   KOINOS_CATCH_LOG_AND_RETHROW( info )
 }
+
+BOOST_AUTO_TEST_CASE( apply_block_delta_checked_test )
+{
+  try
+  {
+    using namespace koinos;
+
+    BOOST_TEST_MESSAGE( "Test checked delta replay: clean path, re-execution fallback, and unrecoverable mismatch" );
+
+    // Execute real signed blocks on the fixture controller to obtain genuine
+    // receipts, then replay them on second controllers opened with the same
+    // genesis data, as the indexer would when syncing from a block store.
+
+    auto make_replay_controller = [ & ]( const std::filesystem::path& dir )
+    {
+      std::filesystem::create_directory( dir );
+      auto c = std::make_unique< chain::controller >( 10'000'000, 64'000 );
+      c->open( dir, _genesis_data, chain::fork_resolution_algorithm::fifo, false );
+      return c;
+    };
+
+    auto duration = std::chrono::system_clock::now().time_since_epoch();
+
+    rpc::chain::submit_block_request block_req_1;
+    block_req_1.mutable_block()->mutable_header()->set_height( 1 );
+    block_req_1.mutable_block()->mutable_header()->set_timestamp(
+      std::chrono::duration_cast< std::chrono::milliseconds >( duration ).count() );
+    block_req_1.mutable_block()->mutable_header()->set_previous(
+      util::converter::as< std::string >( crypto::multihash::zero( crypto::multicodec::sha2_256 ) ) );
+    block_req_1.mutable_block()->mutable_header()->set_previous_state_merkle_root(
+      _controller.get_head_info().head_state_merkle_root() );
+    set_block_merkle_roots( *block_req_1.mutable_block(), crypto::multicodec::sha2_256 );
+    block_req_1.mutable_block()->set_id( util::converter::as< std::string >(
+      koinos::crypto::hash( crypto::multicodec::sha2_256, block_req_1.block().header() ) ) );
+    sign_block( *block_req_1.mutable_block(), _block_signing_private_key );
+
+    auto receipt_1 = _controller.submit_block( block_req_1 ).receipt();
+    BOOST_REQUIRE( receipt_1.state_merkle_root().size() );
+
+    rpc::chain::submit_block_request block_req_2;
+    block_req_2.mutable_block()->mutable_header()->set_height( 2 );
+    block_req_2.mutable_block()->mutable_header()->set_timestamp(
+      std::chrono::duration_cast< std::chrono::milliseconds >( duration ).count() + 3'000 );
+    block_req_2.mutable_block()->mutable_header()->set_previous( block_req_1.block().id() );
+    block_req_2.mutable_block()->mutable_header()->set_previous_state_merkle_root(
+      _controller.get_head_info().head_state_merkle_root() );
+    set_block_merkle_roots( *block_req_2.mutable_block(), crypto::multicodec::sha2_256 );
+    block_req_2.mutable_block()->set_id( util::converter::as< std::string >(
+      koinos::crypto::hash( crypto::multicodec::sha2_256, block_req_2.block().header() ) ) );
+    sign_block( *block_req_2.mutable_block(), _block_signing_private_key );
+
+    auto receipt_2 = _controller.submit_block( block_req_2 ).receipt();
+
+    // Mainnet receipts carry an empty state merkle root; the replayed receipts
+    // below mimic that so the checked-apply expectation is the only root check.
+    auto tamper = [ & ]( protocol::block_receipt receipt )
+    {
+      receipt.clear_state_merkle_root();
+      auto* extra_remove = receipt.add_state_delta_entries();
+      extra_remove->mutable_object_space()->set_system( true );
+      extra_remove->set_key( "checked-apply-extra-remove" );
+      return receipt;
+    };
+
+    BOOST_TEST_MESSAGE( "Checked apply with the correct expected root behaves like the unchecked apply" );
+
+    auto clean_dir        = std::filesystem::temp_directory_path() / boost::filesystem::unique_path().string();
+    auto clean_controller = make_replay_controller( clean_dir );
+
+    BOOST_CHECK_EQUAL( false,
+                       clean_controller->apply_block_delta_checked( block_req_1.block(),
+                                                                    receipt_1,
+                                                                    receipt_1.state_merkle_root(),
+                                                                    2 ) );
+    BOOST_CHECK_EQUAL( util::to_hex( block_req_1.block().id() ),
+                       util::to_hex( clean_controller->get_head_info().head_topology().id() ) );
+    BOOST_CHECK_EQUAL( util::to_hex( receipt_1.state_merkle_root() ),
+                       util::to_hex( clean_controller->get_head_info().head_state_merkle_root() ) );
+
+    BOOST_TEST_MESSAGE( "An irreproducible delta triggers re-execution that rebuilds the consensus root" );
+
+    // The tampered receipt carries a remove entry consensus never included
+    // (the anomaly-1 shape), so no replay of its entries can reproduce the
+    // expected root and the block must be rebuilt by full re-execution. The
+    // parent block 1 is already head, pinning the design constraint that the
+    // fallback only ever discards the still-writable node, never the head.
+    BOOST_CHECK_EQUAL( true,
+                       clean_controller->apply_block_delta_checked( block_req_2.block(),
+                                                                    tamper( receipt_2 ),
+                                                                    receipt_2.state_merkle_root(),
+                                                                    2 ) );
+    BOOST_CHECK_EQUAL( util::to_hex( block_req_2.block().id() ),
+                       util::to_hex( clean_controller->get_head_info().head_topology().id() ) );
+    BOOST_CHECK_EQUAL( util::to_hex( receipt_2.state_merkle_root() ),
+                       util::to_hex( clean_controller->get_head_info().head_state_merkle_root() ) );
+
+    BOOST_TEST_MESSAGE( "An expectation nothing can reproduce halts the sync instead of being masked" );
+
+    auto halt_dir        = std::filesystem::temp_directory_path() / boost::filesystem::unique_path().string();
+    auto halt_controller = make_replay_controller( halt_dir );
+
+    auto unreachable_root = util::converter::as< std::string >(
+      crypto::hash( crypto::multicodec::sha2_256, "not a reachable state merkle root"s ) );
+
+    BOOST_CHECK_THROW( halt_controller->apply_block_delta_checked( block_req_1.block(),
+                                                                   tamper( receipt_1 ),
+                                                                   unreachable_root,
+                                                                   2 ),
+                       chain::state_merkle_mismatch_exception );
+
+    clean_controller.reset();
+    halt_controller.reset();
+    std::filesystem::remove_all( clean_dir );
+    std::filesystem::remove_all( halt_dir );
+  }
+  KOINOS_CATCH_LOG_AND_RETHROW( info )
+}
 BOOST_AUTO_TEST_SUITE_END()
