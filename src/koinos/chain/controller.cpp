@@ -684,7 +684,11 @@ void controller_impl::apply_block_delta( const protocol::block& block,
       if( delta_entry.has_value() )
         block_node->put_object( object_space, delta_entry.key(), &delta_entry.value() );
       else
-        block_node->remove_object( object_space, delta_entry.key() );
+        // A remove entry in a serialized receipt is a committed part of the historical
+        // block delta. It must be preserved as a tombstone even when the key is absent
+        // from the parent state (key created and removed within the same block),
+        // otherwise the replayed state delta merkle root diverges from the receipt root.
+        block_node->remove_object_preserve_tombstone( object_space, delta_entry.key() );
     }
 
     if( block_height % index_message_interval == 0 )
