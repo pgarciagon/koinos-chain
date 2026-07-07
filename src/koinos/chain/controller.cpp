@@ -663,6 +663,14 @@ void controller_impl::apply_block_delta( const protocol::block& block,
     return; // Block is current LIB
   }
 
+  // The header's previous state merkle root is the consensus-signed root of the
+  // parent block's delta. Replay must verify it like full execution does, or a
+  // divergence surfaces far from the block that caused it.
+  KOINOS_ASSERT( block.header().previous_state_merkle_root()
+                   == util::converter::as< std::string >( parent_node->merkle_root() ),
+                 state_merkle_mismatch_exception,
+                 "block previous state merkle mismatch" );
+
   block_node = _db.create_writable_node( parent_id, block_id, block.header(), db_lock );
 
   execution_context ctx( _vm_backend, intent::block_application );
@@ -689,6 +697,16 @@ void controller_impl::apply_block_delta( const protocol::block& block,
         // from the parent state (key created and removed within the same block),
         // otherwise the replayed state delta merkle root diverges from the receipt root.
         block_node->remove_object_preserve_tombstone( object_space, delta_entry.key() );
+    }
+
+    // All mainnet receipts to date carry an empty state merkle root, but if one is
+    // present the replayed delta must reproduce it exactly.
+    if( receipt.state_merkle_root().size() )
+    {
+      KOINOS_ASSERT( receipt.state_merkle_root()
+                       == util::converter::as< std::string >( block_node->pending_merkle_root() ),
+                     state_merkle_mismatch_exception,
+                     "replayed state delta merkle root does not match block receipt" );
     }
 
     if( block_height % index_message_interval == 0 )
