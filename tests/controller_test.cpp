@@ -10,6 +10,7 @@
 #include <koinos/chain/state.hpp>
 #include <koinos/chain/system_calls.hpp>
 #include <koinos/crypto/elliptic.hpp>
+#include <koinos/crypto/merkle_tree.hpp>
 #include <koinos/crypto/multihash.hpp>
 #include <koinos/util/base58.hpp>
 #include <koinos/util/hex.hpp>
@@ -21,7 +22,10 @@
 #include <koinos/chain/system_calls.pb.h>
 #include <koinos/contracts/token/token.pb.h>
 
+#include <algorithm>
 #include <chrono>
+#include <utility>
+#include <vector>
 #include <filesystem>
 #include <sstream>
 
@@ -1684,6 +1688,268 @@ BOOST_AUTO_TEST_CASE( invoke_system_call_test )
     {
       BOOST_FAIL( "An unexpected exception was thrown" );
     }
+  }
+  KOINOS_CATCH_LOG_AND_RETHROW( info )
+}
+
+BOOST_AUTO_TEST_CASE( apply_block_delta_tombstone_test )
+{
+  try
+  {
+    using namespace koinos;
+
+    BOOST_TEST_MESSAGE( "Test that apply_block_delta preserves receipt remove entries as tombstones" );
+
+    // A block receipt is a compacted net delta. When a key is created and removed within
+    // the same block, the receipt contains a remove entry for a key that is absent from
+    // the parent state. Replaying that entry must preserve the tombstone, otherwise the
+    // replayed state delta merkle root diverges from the network and the next block fails
+    // with a previous state merkle mismatch.
+
+    const auto space = chain::state::space::metadata();
+
+    protocol::object_space delta_space;
+    delta_space.set_system( space.system() );
+    delta_space.set_zone( space.zone() );
+    delta_space.set_id( space.id() );
+
+    auto database_key_string = [ & ]( const std::string& key )
+    {
+      chain::database_key db_key;
+      *db_key.mutable_space() = space;
+      db_key.set_key( key );
+      return util::converter::as< std::string >( db_key );
+    };
+
+    auto delta_merkle_root = [ & ]( std::vector< std::pair< std::string, std::string > > entries )
+    {
+      std::sort( entries.begin(),
+                 entries.end(),
+                 []( const auto& lhs, const auto& rhs )
+                 {
+                   return lhs.first < rhs.first;
+                 } );
+
+      std::vector< std::string > merkle_leafs;
+      merkle_leafs.reserve( entries.size() * 2 );
+      for( const auto& [ key, value ]: entries )
+      {
+        merkle_leafs.push_back( key );
+        merkle_leafs.push_back( value );
+      }
+
+      return util::converter::as< std::string >(
+        crypto::merkle_tree< std::string >( crypto::multicodec::sha2_256, merkle_leafs ).root()->hash() );
+    };
+
+    const std::string old_key       = "delta-old-key";
+    const std::string old_value     = "delta-old-value";
+    const std::string transient_key = "delta-transient-key";
+    const std::string final_key     = "delta-final-key";
+    const std::string final_value   = "delta-final-value";
+
+    auto duration = std::chrono::system_clock::now().time_since_epoch();
+
+    // Block 1 puts the old key so that block 2 can legitimately remove it
+    protocol::block block_1;
+    block_1.mutable_header()->set_height( 1 );
+    block_1.mutable_header()->set_previous(
+      util::converter::as< std::string >( crypto::multihash::zero( crypto::multicodec::sha2_256 ) ) );
+    block_1.mutable_header()->set_previous_state_merkle_root(
+      _controller.get_head_info().head_state_merkle_root() );
+    block_1.mutable_header()->set_timestamp(
+      std::chrono::duration_cast< std::chrono::milliseconds >( duration ).count() );
+    block_1.set_id(
+      util::converter::as< std::string >( crypto::hash( crypto::multicodec::sha2_256, block_1.header() ) ) );
+
+    protocol::block_receipt receipt_1;
+    auto* put_entry                   = receipt_1.add_state_delta_entries();
+    *put_entry->mutable_object_space() = delta_space;
+    put_entry->set_key( old_key );
+    put_entry->set_value( old_value );
+
+    _controller.apply_block_delta( block_1, receipt_1, 2 );
+
+    auto block_1_root = _controller.get_head_info().head_state_merkle_root();
+    BOOST_REQUIRE_EQUAL( util::to_hex( delta_merkle_root( {
+                           { database_key_string( old_key ), old_value }
+    } ) ),
+                         util::to_hex( block_1_root ) );
+
+    // Block 2 carries the compacted delta of: remove old, put transient, remove
+    // transient, put final. The serialized receipt therefore contains a remove
+    // entry for the transient key, which is absent from the parent state.
+    protocol::block block_2;
+    block_2.mutable_header()->set_height( 2 );
+    block_2.mutable_header()->set_previous( block_1.id() );
+    block_2.mutable_header()->set_previous_state_merkle_root( block_1_root );
+    block_2.mutable_header()->set_timestamp(
+      std::chrono::duration_cast< std::chrono::milliseconds >( duration ).count() + 3'000 );
+    block_2.set_id(
+      util::converter::as< std::string >( crypto::hash( crypto::multicodec::sha2_256, block_2.header() ) ) );
+
+    protocol::block_receipt receipt_2;
+
+    auto* remove_old_entry                    = receipt_2.add_state_delta_entries();
+    *remove_old_entry->mutable_object_space() = delta_space;
+    remove_old_entry->set_key( old_key );
+
+    auto* remove_transient_entry                    = receipt_2.add_state_delta_entries();
+    *remove_transient_entry->mutable_object_space() = delta_space;
+    remove_transient_entry->set_key( transient_key );
+
+    auto* put_final_entry                    = receipt_2.add_state_delta_entries();
+    *put_final_entry->mutable_object_space() = delta_space;
+    put_final_entry->set_key( final_key );
+    put_final_entry->set_value( final_value );
+
+    _controller.apply_block_delta( block_2, receipt_2, 2 );
+
+    // The replayed delta merkle root must include the absent-key tombstone. Without
+    // preserved tombstone semantics the transient remove entry is dropped and this
+    // root no longer matches the network, so the next block would be rejected with
+    // "block previous state merkle mismatch".
+    BOOST_REQUIRE_EQUAL( util::to_hex( delta_merkle_root( {
+                           { database_key_string( old_key ), std::string() },
+                           { database_key_string( transient_key ), std::string() },
+                           { database_key_string( final_key ), final_value }
+    } ) ),
+                         util::to_hex( _controller.get_head_info().head_state_merkle_root() ) );
+  }
+  KOINOS_CATCH_LOG_AND_RETHROW( info )
+}
+
+BOOST_AUTO_TEST_CASE( apply_block_delta_kfs_tombstone_test )
+{
+  try
+  {
+    using namespace koinos;
+
+    BOOST_TEST_MESSAGE( "Test that apply_block_delta preserves tombstones in the Koinos Fund vote ordering flow" );
+
+    // The historical mainnet trigger: the Koinos Fund contract keeps a vote-ordering
+    // index keyed by total votes. A vote update within a block moves a project entry
+    // through an intermediate ordering key that is created and removed in the same
+    // block (vhp burn -> vote update -> koin mint -> vote update again). The compacted
+    // receipt therefore contains a remove entry for an ordering key that is absent
+    // from the parent state. This reproduces the failure shape of causal block
+    // 32789377 ("11 delta entries instead of 12").
+
+    const std::string kfs_contract_id = "1A5BmMqV5jN5zBrdkhQumAfDZBzXLPBeN9";
+
+    chain::object_space space;
+    space.set_system( true );
+    space.set_zone( util::from_base58< std::string >( kfs_contract_id ) );
+    space.set_id( 2 );
+
+    protocol::object_space delta_space;
+    delta_space.set_system( space.system() );
+    delta_space.set_zone( space.zone() );
+    delta_space.set_id( space.id() );
+
+    auto database_key_string = [ & ]( const std::string& key )
+    {
+      chain::database_key db_key;
+      *db_key.mutable_space() = space;
+      db_key.set_key( key );
+      return util::converter::as< std::string >( db_key );
+    };
+
+    auto delta_merkle_root = [ & ]( std::vector< std::pair< std::string, std::string > > entries )
+    {
+      std::sort( entries.begin(),
+                 entries.end(),
+                 []( const auto& lhs, const auto& rhs )
+                 {
+                   return lhs.first < rhs.first;
+                 } );
+
+      std::vector< std::string > merkle_leafs;
+      merkle_leafs.reserve( entries.size() * 2 );
+      for( const auto& [ key, value ]: entries )
+      {
+        merkle_leafs.push_back( key );
+        merkle_leafs.push_back( value );
+      }
+
+      return util::converter::as< std::string >(
+        crypto::merkle_tree< std::string >( crypto::multicodec::sha2_256, merkle_leafs ).root()->hash() );
+    };
+
+    const std::string old_order_key       = "active/by_votes/0000000100/project/0000000007";
+    const std::string old_order_value     = "fund.project id=7 status=active total_votes=100";
+    const std::string transient_order_key = "active/by_votes/0000000175/project/0000000007";
+    const std::string final_order_key     = "active/by_votes/0000000250/project/0000000007";
+    const std::string final_order_value   = "fund.project id=7 status=active total_votes=250";
+
+    auto duration = std::chrono::system_clock::now().time_since_epoch();
+
+    // Block 1 establishes the current vote-ordering entry in the parent state
+    protocol::block block_1;
+    block_1.mutable_header()->set_height( 1 );
+    block_1.mutable_header()->set_previous(
+      util::converter::as< std::string >( crypto::multihash::zero( crypto::multicodec::sha2_256 ) ) );
+    block_1.mutable_header()->set_previous_state_merkle_root(
+      _controller.get_head_info().head_state_merkle_root() );
+    block_1.mutable_header()->set_timestamp(
+      std::chrono::duration_cast< std::chrono::milliseconds >( duration ).count() );
+    block_1.set_id(
+      util::converter::as< std::string >( crypto::hash( crypto::multicodec::sha2_256, block_1.header() ) ) );
+
+    protocol::block_receipt receipt_1;
+    auto* put_entry                    = receipt_1.add_state_delta_entries();
+    *put_entry->mutable_object_space() = delta_space;
+    put_entry->set_key( old_order_key );
+    put_entry->set_value( old_order_value );
+
+    _controller.apply_block_delta( block_1, receipt_1, 2 );
+
+    auto block_1_root = _controller.get_head_info().head_state_merkle_root();
+    BOOST_REQUIRE_EQUAL( util::to_hex( delta_merkle_root( {
+                           { database_key_string( old_order_key ), old_order_value }
+    } ) ),
+                         util::to_hex( block_1_root ) );
+
+    // Block 2 carries the compacted delta of the vote update: remove the old
+    // ordering key, put and remove the intermediate ordering key, put the final
+    // ordering key. The serialized receipt contains a remove entry for the
+    // intermediate key, which is absent from the parent state.
+    protocol::block block_2;
+    block_2.mutable_header()->set_height( 2 );
+    block_2.mutable_header()->set_previous( block_1.id() );
+    block_2.mutable_header()->set_previous_state_merkle_root( block_1_root );
+    block_2.mutable_header()->set_timestamp(
+      std::chrono::duration_cast< std::chrono::milliseconds >( duration ).count() + 3'000 );
+    block_2.set_id(
+      util::converter::as< std::string >( crypto::hash( crypto::multicodec::sha2_256, block_2.header() ) ) );
+
+    protocol::block_receipt receipt_2;
+
+    auto* remove_old_entry                    = receipt_2.add_state_delta_entries();
+    *remove_old_entry->mutable_object_space() = delta_space;
+    remove_old_entry->set_key( old_order_key );
+
+    auto* remove_transient_entry                    = receipt_2.add_state_delta_entries();
+    *remove_transient_entry->mutable_object_space() = delta_space;
+    remove_transient_entry->set_key( transient_order_key );
+
+    auto* put_final_entry                    = receipt_2.add_state_delta_entries();
+    *put_final_entry->mutable_object_space() = delta_space;
+    put_final_entry->set_key( final_order_key );
+    put_final_entry->set_value( final_order_value );
+
+    _controller.apply_block_delta( block_2, receipt_2, 2 );
+
+    // All three receipt entries, including the absent-key tombstone for the
+    // intermediate ordering key, must contribute to the replayed delta merkle
+    // root. Dropping the tombstone computes a root over one fewer entry and the
+    // next block fails with "block previous state merkle mismatch".
+    BOOST_REQUIRE_EQUAL( util::to_hex( delta_merkle_root( {
+                           { database_key_string( old_order_key ), std::string() },
+                           { database_key_string( transient_order_key ), std::string() },
+                           { database_key_string( final_order_key ), final_order_value }
+    } ) ),
+                         util::to_hex( _controller.get_head_info().head_state_merkle_root() ) );
   }
   KOINOS_CATCH_LOG_AND_RETHROW( info )
 }
