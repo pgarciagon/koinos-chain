@@ -219,11 +219,22 @@ void indexer::process_block()
 
     if( _request_processing_complete && _block_queue.empty() )
     {
+      if( _pending_item )
+      {
+        // The final item is the target head. It has no successor header to check
+        // against, so it is applied unchecked; its root is cross-checked by the
+        // first live block, as before.
+        _controller.apply_block_delta( _pending_item->block(), _pending_item->receipt(), _target_head.height() );
+        _pending_item.reset();
+      }
+
       const auto new_head_info                       = _controller.get_head_info();
       const std::chrono::duration< double > duration = std::chrono::system_clock::now() - _start_time;
       LOG( info ) << "Finished indexing "
                   << new_head_info.head_topology().height() - _start_head_info.head_topology().height()
                   << " blocks, took " << duration.count() << " seconds";
+      if( !_verify_blocks )
+        LOG( info ) << "Delta replay re-execution fallbacks: " << _fallback_count;
       _complete->set_value( true );
       _complete.reset();
       return;
@@ -238,7 +249,20 @@ void indexer::process_block()
       _controller.submit_block( submit_block, _target_head.height() );
     }
     else
-      _controller.apply_block_delta( block_item.block(), block_item.receipt(), _target_head.height() );
+    {
+      // One-block lookahead: the newly pulled item's header carries the
+      // consensus-signed merkle root of the pending block's delta
+      if( _pending_item )
+      {
+        if( _controller.apply_block_delta_checked( _pending_item->block(),
+                                                   _pending_item->receipt(),
+                                                   block_item.block().header().previous_state_merkle_root(),
+                                                   _target_head.height() ) )
+          _fallback_count++;
+      }
+
+      _pending_item = std::move( block_item );
+    }
 
     boost::asio::post( std::bind( &indexer::process_block, this ) );
   }

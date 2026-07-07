@@ -104,7 +104,7 @@ public:
   void set_client( std::shared_ptr< mq::client > c );
 
   apply_block_result apply_block( const protocol::block& block, const apply_block_options& opts );
-  void apply_block_delta( const protocol::block&,
+  bool apply_block_delta( const protocol::block&,
                           const protocol::block_receipt&,
                           uint64_t,
                           const std::optional< std::string >& expected_root = {} );
@@ -634,7 +634,7 @@ apply_block_result controller_impl::apply_block( const protocol::block& block, c
   return res;
 }
 
-void controller_impl::apply_block_delta( const protocol::block& block,
+bool controller_impl::apply_block_delta( const protocol::block& block,
                                          const protocol::block_receipt& receipt,
                                          uint64_t index_to,
                                          const std::optional< std::string >& expected_root )
@@ -664,7 +664,7 @@ void controller_impl::apply_block_delta( const protocol::block& block,
                    pre_irreversibility_block_exception,
                    "block is prior to irreversibility" );
     KOINOS_ASSERT( block_id == root->id(), unknown_previous_block_exception, "unknown previous block" );
-    return; // Block is current LIB
+    return false; // Block is current LIB
   }
 
   // The header's previous state merkle root is the consensus-signed root of the
@@ -848,6 +848,8 @@ void controller_impl::apply_block_delta( const protocol::block& block,
                    state_merkle_mismatch_exception,
                    "re-executed block does not reproduce the consensus state merkle root" );
   }
+
+  return reexecute;
 }
 
 rpc::chain::submit_transaction_response
@@ -1378,12 +1380,12 @@ void controller::apply_block_delta( const protocol::block& block,
   _my->apply_block_delta( block, receipt, index_to );
 }
 
-void controller::apply_block_delta_checked( const protocol::block& block,
+bool controller::apply_block_delta_checked( const protocol::block& block,
                                             const protocol::block_receipt& receipt,
                                             const std::string& expected_root,
                                             uint64_t index_to )
 {
-  _my->apply_block_delta( block, receipt, index_to, expected_root );
+  return _my->apply_block_delta( block, receipt, index_to, expected_root );
 }
 
 rpc::chain::propose_block_response controller::propose_block( const rpc::chain::propose_block_request& request,

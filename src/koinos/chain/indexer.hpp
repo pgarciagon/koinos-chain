@@ -45,6 +45,11 @@ private:
 
   boost::concurrent::sync_bounded_queue< block_store::block_item > _block_queue;
 
+  // One-block lookahead for delta replay: block H is applied when H+1 is pulled,
+  // so H+1's header supplies the consensus expectation for H's delta root
+  std::optional< block_store::block_item > _pending_item;
+  uint64_t _fallback_count = 0;
+
   block_topology _target_head;
   rpc::chain::get_head_info_response _start_head_info;
   const std::chrono::time_point< std::chrono::system_clock > _start_time = std::chrono::system_clock::now();
