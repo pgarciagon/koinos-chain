@@ -392,10 +392,15 @@ apply_block_result controller_impl::apply_block( const protocol::block& block, c
                    timestamp_out_of_bounds_exception,
                    "block timestamp is too old" );
 
-    KOINOS_ASSERT( block.header().previous_state_merkle_root()
-                     == util::converter::as< std::string >( parent_node->merkle_root() ),
-                   state_merkle_mismatch_exception,
-                   "block previous state merkle mismatch" );
+    {
+      auto parent_root = util::converter::as< std::string >( parent_node->merkle_root() );
+      KOINOS_ASSERT( block.header().previous_state_merkle_root() == parent_root
+                       || acceptable_rectified_previous_root( block.header().previous(),
+                                                              parent_root,
+                                                              block.header().previous_state_merkle_root() ),
+                     state_merkle_mismatch_exception,
+                     "block previous state merkle mismatch" );
+    }
 
     ctx.push_frame( stack_frame{ .call_privilege = privilege::kernel_mode } );
 
@@ -670,10 +675,15 @@ bool controller_impl::apply_block_delta( const protocol::block& block,
   // The header's previous state merkle root is the consensus-signed root of the
   // parent block's delta. Replay must verify it like full execution does, or a
   // divergence surfaces far from the block that caused it.
-  KOINOS_ASSERT( block.header().previous_state_merkle_root()
-                   == util::converter::as< std::string >( parent_node->merkle_root() ),
-                 state_merkle_mismatch_exception,
-                 "block previous state merkle mismatch" );
+  {
+    auto parent_root = util::converter::as< std::string >( parent_node->merkle_root() );
+    KOINOS_ASSERT( block.header().previous_state_merkle_root() == parent_root
+                     || acceptable_rectified_previous_root( block.header().previous(),
+                                                            parent_root,
+                                                            block.header().previous_state_merkle_root() ),
+                   state_merkle_mismatch_exception,
+                   "block previous state merkle mismatch" );
+  }
 
   block_node = _db.create_writable_node( parent_id, block_id, block.header(), db_lock );
 
@@ -715,15 +725,20 @@ bool controller_impl::apply_block_delta( const protocol::block& block,
                      "replayed state delta merkle root does not match block receipt" );
     }
 
-    // A recorded receipt delta is not always reproducible: a remove entry may have
-    // been a no-op during execution (excluded from the consensus root but recorded
-    // in the receipt), or the receipt may have lost an entry entirely. When the
+    // A recorded receipt delta is not always reproducible: the receipt may have
+    // lost entries (see maybe_rectify_state), or the signed root itself may be a
+    // known consensus scar (see acceptable_rectified_previous_root). When the
     // caller knows the consensus-signed expectation for this block's root and the
-    // replayed delta does not reproduce it, discard the still-writable node and
-    // rebuild it by fully re-executing the block. Once the node is finalized this
-    // repair is impossible - the head node cannot be discarded.
+    // replayed delta does not reproduce it - directly or through a recorded
+    // rectification - discard the still-writable node and rebuild it by fully
+    // re-executing the block. Once the node is finalized this repair is
+    // impossible - the head node cannot be discarded.
     if( expected_root
-        && *expected_root != util::converter::as< std::string >( block_node->pending_merkle_root() ) )
+        && *expected_root != util::converter::as< std::string >( block_node->pending_merkle_root() )
+        && !acceptable_rectified_previous_root(
+          block.id(),
+          util::converter::as< std::string >( block_node->pending_merkle_root() ),
+          *expected_root ) )
     {
       LOG( warning ) << "delta_replay_fallback height=" << block_height << " id=" << block_id
                      << " - replayed delta root does not match the consensus root signed in the"

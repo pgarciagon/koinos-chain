@@ -2070,4 +2070,136 @@ BOOST_AUTO_TEST_CASE( apply_block_delta_checked_test )
   }
   KOINOS_CATCH_LOG_AND_RETHROW( info )
 }
+
+BOOST_AUTO_TEST_CASE( rectified_previous_root_test )
+{
+  try
+  {
+    using namespace koinos;
+
+    BOOST_TEST_MESSAGE( "Test the recorded consensus scar of mainnet block 32,789,377" );
+
+    // Mainnet block 32,789,377 (the last block before the January 2026 halt)
+    // has an honest 12-entry delta, but the root signed into block
+    // 32,789,378's header is the 11-entry value computed by the pre-fix
+    // tombstone-dropping replay during the halt recovery. The replayed honest
+    // root must be accepted against the historically signed value - and only
+    // that exact pair.
+    //
+    // The receipt below is the block's real mainnet delta, byte for byte.
+
+    const auto block_id = util::from_hex< std::string >(
+      "0x1220a97d7b0567ad55e3b04446a2bef447335cfd676668b069544b04a4719146d586" );
+    const auto honest_root = util::from_hex< std::string >(
+      "0x12203a22d59290a838dd49c87f57fe80319636950948f6b9aaf02287c03bb36e5f68" );
+    const auto signed_root = util::from_hex< std::string >(
+      "0x12209948b54dee01acd8528cf15dec02366b76e7739aedaf4487859bf6d0d182d690" );
+
+    protocol::block_receipt receipt_1;
+
+    auto add_entry = [ & ]( bool system,
+                            const std::string& zone,
+                            uint32_t space_id,
+                            const std::string& key,
+                            const std::optional< std::string >& value )
+    {
+      auto* entry = receipt_1.add_state_delta_entries();
+      entry->mutable_object_space()->set_system( system );
+      if( zone.size() )
+        entry->mutable_object_space()->set_zone( zone );
+      if( space_id )
+        entry->mutable_object_space()->set_id( space_id );
+      entry->set_key( key );
+      if( value )
+        entry->set_value( *value );
+    };
+
+    add_entry( true, std::string(), 0, util::from_hex< std::string >( "0x1220c8897aa6247e44fabf73270b3264002a9b2fa6654ad7447e3b3f8026ab391b4c" ), util::from_hex< std::string >( "0x0a221220a97d7b0567ad55e3b04446a2bef447335cfd676668b069544b04a4719146d5861293010a22122044622d4cade292dfbf1cc24ba069cd385107997e03fbc7475c5d89069a03a6611081a7d10f18c2c1cf8ebe3322221220e4a6e321d41acff12f3d26fee110c53d92a9efb331547d1fd0d300c6c5d02dac2a221220e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b8553219000527cd65bc68ac4304b43234714605b954d45023034714e422ba010a5103dd75eddffb5ee7dd390571dbfdd428f530501e8c49a355169121ef2b0e6546bdb75ad290526df1bca61d3632b8bd2c2f2239f8c9b00309ee612f1862fc66dd4045ddbb64265e3bd0441f2cc4779c18301222122000124d8a5dcd089fdbeacac0c5174d5b8024da635be93c3f21f79e924aedf45d1a412058ae0f8bc597905128f00689fe94bfbee728beec97582c5c1496f6bee6e6289d48265ed215ee25709f8d3a5aae3df3f419e77608194bf7d1092741911a76b58e" ) );
+    add_entry( true, util::from_hex< std::string >( "0x002e33fd1aa907b224ce9ce6c94228901d283a02da956da791" ), 0, std::string(), util::from_hex< std::string >( "0x088ec7bf87d7b6d20b" ) );
+    add_entry( true, util::from_hex< std::string >( "0x0069b8719f8b592ae1c3eb8ded2dd4db7c6f915c0cca69e572" ), 0, std::string(), util::from_hex< std::string >( "0x08da9ecb88c0908d03" ) );
+    add_entry( true, util::from_hex< std::string >( "0x00b269e82eb32028cb450f03123e3c4d2f91a7c7ebf4e5bc7c" ), 0, util::from_hex< std::string >( "0x6d61726b657473" ), util::from_hex< std::string >( "0x0a0e08dd86fd841f18b0b50220808020120f08dae8eda4cd0118808010208080401a1308fbb2e091edcf0218e0c2b51b20e0cd8b8901" ) );
+    add_entry( true, util::from_hex< std::string >( "0x002d8960ca118d09aaa2a1d5d25b65d22045f78855e44dd0b1" ), 1, std::string(), util::from_hex< std::string >( "0x0a2212203ffc8ccbcfe6ab5e56ebffc26727a6ba63de1e4797a7faf47c144bfad117d3641210000000000000000001e017454ff4cc2118c2c1cf8ebe332080bcb29fc133" ) );
+    add_entry( true, util::from_hex< std::string >( "0x002e33fd1aa907b224ce9ce6c94228901d283a02da956da791" ), 1, util::from_hex< std::string >( "0x000527cd65bc68ac4304b43234714605b954d45023034714e4" ), util::from_hex< std::string >( "0x08b5c8fbcec6d90110dfba82fcb59d0118c2c1cf8ebe332001" ) );
+    add_entry( true, util::from_hex< std::string >( "0x002e33fd1aa907b224ce9ce6c94228901d283a02da956da791" ), 1, util::from_hex< std::string >( "0x006383c82ba18b95ea6c9581df4b4fe016045a6087ea6ab6ce" ), util::from_hex< std::string >( "0x08edd4d6abbbcd0510edd4d6abbbcd0518c2c1cf8ebe33" ) );
+    add_entry( true, util::from_hex< std::string >( "0x006383c82ba18b95ea6c9581df4b4fe016045a6087ea6ab6ce" ), 1, util::from_hex< std::string >( "0x34" ), util::from_hex< std::string >( "0x08041219007394988c75ad83ba63b339a3318606ea51fbf7107a8b5e6a1a1900347617651ea179eec3998a12f39961294e4eff0ca9fb72b82249566f72746578204272696467653a20506f776572696e67204b6f696e6f7320457870616e73696f6e204163726f73732045564d20616e6420536f6c616e612045636f73797374656d732acb0654686520566f7274657820427269646765207465616d2077696c6c206d61696e7461696e20616e6420657870616e64207468652063726f73732d636861696e20696e66726173747275637475726520636f6e6e656374696e67204b6f696e6f732077697468206d616a6f722065636f73797374656d732c20656e61626c696e6720696e7465726f7065726162696c6974792c206d61726b6574206163636573732c20616e6420757365722067726f777468206f6e20424e4220436861696e20616e6420536f6c616e612e0a0a4f70657261746520616e64206d6f6e69746f7220746865206578697374696e6720457468657265756d20e28694204b6f696e6f7320627269646765207769746820736563757265207472616e73666572732e20457870616e6420746f20424e4220436861696e20616e64206f746865722045564d206e6574776f726b732e20496e74656772617465207769746820536f6c616e61207468726f75676820576f726d686f6c6520746f20737570706f727420764b4f494e20e2869420774b4f494e206272696467696e67207768696c65206c657665726167696e67206578697374696e67206c69717569646974792e2050726f7669646520696e63656e746976657320746f20656e73757265206d61726b657420646570746820616e64207375737461696e61626c652074726164696e672e204f66666572207472616e73706172656e7420616e616c7974696373206f66206c697175696469747920666c6f77732c20766f6c756d65732c20616e6420706572666f726d616e63652e0a0a4c69717569646974792077696c6c206265206465706c6f796564206772616475616c6c7920746f2072656475636520766f6c6174696c6974792c2077697468206d6f6e74686c7920757064617465732e0a0a46756e64696e673a203135302c303030204b4f494e20706572206d6f6e746820666f722034206d6f6e74687320666f7220696e697469616c206c697175696469747920616e6420696e63656e74697665732e204c6174657220706861736573207265717569726520726564756365642066756e64696e6720666f72206d61696e74656e616e63652e20556e75736564206c697175696469747920737461797320696e207468652074726561737572792e3080e0afadc7b4033880d08eeaa2334080d8e190c933480150a0afc8dc9890d8035800580058d8f8b5a5bfedd3025880fcbfa5dffe830158c8bad291fa235800" ) );
+    add_entry( true, util::from_hex< std::string >( "0x006383c82ba18b95ea6c9581df4b4fe016045a6087ea6ab6ce" ), 2, util::from_hex< std::string >( "0x3032303736343330323334323533303630393939393936" ), std::nullopt );
+    add_entry( true, util::from_hex< std::string >( "0x006383c82ba18b95ea6c9581df4b4fe016045a6087ea6ab6ce" ), 2, util::from_hex< std::string >( "0x3032303736343334313930373631313430393939393936" ), std::nullopt );
+    add_entry( true, util::from_hex< std::string >( "0x006383c82ba18b95ea6c9581df4b4fe016045a6087ea6ab6ce" ), 2, util::from_hex< std::string >( "0x3032303736343334333435363239363030393939393936" ), std::string() );
+    add_entry( true, util::from_hex< std::string >( "0x0069b8719f8b592ae1c3eb8ded2dd4db7c6f915c0cca69e572" ), 1, util::from_hex< std::string >( "0x000527cd65bc68ac4304b43234714605b954d45023034714e4" ), util::from_hex< std::string >( "0x08a8e6d2d9869714120d08bed6cb0f10a8e6d2d98697141801" ) );
+
+    auto duration = std::chrono::system_clock::now().time_since_epoch();
+
+    protocol::block block_1;
+    block_1.mutable_header()->set_height( 1 );
+    block_1.mutable_header()->set_previous(
+      util::converter::as< std::string >( crypto::multihash::zero( crypto::multicodec::sha2_256 ) ) );
+    block_1.mutable_header()->set_previous_state_merkle_root(
+      _controller.get_head_info().head_state_merkle_root() );
+    block_1.mutable_header()->set_timestamp(
+      std::chrono::duration_cast< std::chrono::milliseconds >( duration ).count() );
+    block_1.set_id( block_id );
+
+    BOOST_TEST_MESSAGE( "Preserve-tombstone replay of the real receipt reproduces the honest root" );
+
+    _controller.apply_block_delta( block_1, receipt_1, 2 );
+    BOOST_REQUIRE_EQUAL( util::to_hex( honest_root ),
+                         util::to_hex( _controller.get_head_info().head_state_merkle_root() ) );
+
+    BOOST_TEST_MESSAGE( "The historically signed root is accepted for the next block" );
+
+    protocol::block block_2;
+    block_2.mutable_header()->set_height( 2 );
+    block_2.mutable_header()->set_previous( block_id );
+    block_2.mutable_header()->set_previous_state_merkle_root( signed_root );
+    block_2.mutable_header()->set_timestamp(
+      std::chrono::duration_cast< std::chrono::milliseconds >( duration ).count() + 3'000 );
+    block_2.set_id(
+      util::converter::as< std::string >( crypto::hash( crypto::multicodec::sha2_256, block_2.header() ) ) );
+
+    protocol::block_receipt receipt_2;
+    auto* put_entry                    = receipt_2.add_state_delta_entries();
+    *put_entry->mutable_object_space() = receipt_1.state_delta_entries( 0 ).object_space();
+    put_entry->set_key( "rectified-root-follow-up" );
+    put_entry->set_value( "value" );
+
+    _controller.apply_block_delta( block_2, receipt_2, 2 );
+    BOOST_CHECK_EQUAL( util::to_hex( block_2.id() ),
+                       util::to_hex( _controller.get_head_info().head_topology().id() ) );
+
+    BOOST_TEST_MESSAGE( "Any other mismatching root still throws" );
+
+    protocol::block block_2b;
+    block_2b.mutable_header()->set_height( 2 );
+    block_2b.mutable_header()->set_previous( block_id );
+    block_2b.mutable_header()->set_previous_state_merkle_root( util::converter::as< std::string >(
+      crypto::hash( crypto::multicodec::sha2_256, "not the signed root"s ) ) );
+    block_2b.mutable_header()->set_timestamp(
+      std::chrono::duration_cast< std::chrono::milliseconds >( duration ).count() + 6'000 );
+    block_2b.set_id(
+      util::converter::as< std::string >( crypto::hash( crypto::multicodec::sha2_256, block_2b.header() ) ) );
+
+    BOOST_CHECK_THROW( _controller.apply_block_delta( block_2b, receipt_2, 2 ),
+                       chain::state_merkle_mismatch_exception );
+
+    BOOST_TEST_MESSAGE( "Checked replay accepts the signed expectation without triggering the fallback" );
+
+    auto replay_dir = std::filesystem::temp_directory_path() / boost::filesystem::unique_path().string();
+    std::filesystem::create_directory( replay_dir );
+    auto replay_controller = std::make_unique< chain::controller >( 10'000'000, 64'000 );
+    replay_controller->open( replay_dir, _genesis_data, chain::fork_resolution_algorithm::fifo, false );
+
+    protocol::block replay_block_1 = block_1;
+    replay_block_1.mutable_header()->set_previous_state_merkle_root(
+      replay_controller->get_head_info().head_state_merkle_root() );
+
+    BOOST_CHECK_EQUAL( false,
+                       replay_controller->apply_block_delta_checked( replay_block_1, receipt_1, signed_root, 2 ) );
+    BOOST_CHECK_EQUAL( util::to_hex( honest_root ),
+                       util::to_hex( replay_controller->get_head_info().head_state_merkle_root() ) );
+
+    replay_controller.reset();
+    std::filesystem::remove_all( replay_dir );
+  }
+  KOINOS_CATCH_LOG_AND_RETHROW( info )
+}
 BOOST_AUTO_TEST_SUITE_END()

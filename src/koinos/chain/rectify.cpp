@@ -117,4 +117,38 @@ void maybe_rectify_state( execution_context& ctx, const protocol::block& block, 
   }
 }
 
+bool acceptable_rectified_previous_root( const std::string& parent_block_id,
+                                         const std::string& computed_parent_root,
+                                         const std::string& claimed_previous_root )
+{
+  // Mainnet block 32,789,377 - the last block before the January 2026 halt.
+  //
+  // Its honest state delta contains 12 entries, including a remove of the
+  // Koinos Fund vote ordering key "02076430234253060999996". The neighbouring
+  // blocks of the same shape (32,789,375 and 32,789,376) prove the network
+  // counted such removes: their signed roots match only when all 12 entries
+  // are preserved. When production resumed after the halt, the recovering
+  // node computed this block's delta root with the pre-fix replay semantics,
+  // which dropped that tombstone, and the resulting 11-entry root was signed
+  // into block 32,789,378's previous_state_merkle_root. The signed value is
+  // therefore a permanent consensus scar: no honest application of the block
+  // can reproduce it.
+  //
+  // Accept the historically signed root, but only when the locally computed
+  // root is the honest one - any other combination is genuine corruption.
+  if( parent_block_id
+      == util::from_hex< std::string >(
+        "0x1220a97d7b0567ad55e3b04446a2bef447335cfd676668b069544b04a4719146d586" ) )
+  {
+    return computed_parent_root
+             == util::from_hex< std::string >(
+               "0x12203a22d59290a838dd49c87f57fe80319636950948f6b9aaf02287c03bb36e5f68" )
+        && claimed_previous_root
+             == util::from_hex< std::string >(
+               "0x12209948b54dee01acd8528cf15dec02366b76e7739aedaf4487859bf6d0d182d690" );
+  }
+
+  return false;
+}
+
 } // namespace koinos::chain
