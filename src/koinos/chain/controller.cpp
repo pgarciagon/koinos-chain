@@ -104,7 +104,10 @@ public:
   void set_client( std::shared_ptr< mq::client > c );
 
   apply_block_result apply_block( const protocol::block& block, const apply_block_options& opts );
-  void apply_block_delta( const protocol::block&, const protocol::block_receipt&, uint64_t );
+  bool apply_block_delta( const protocol::block&,
+                          const protocol::block_receipt&,
+                          uint64_t,
+                          const std::optional< std::string >& expected_root = {} );
 
   rpc::chain::submit_transaction_response submit_transaction( const rpc::chain::submit_transaction_request& );
   rpc::chain::get_head_info_response get_head_info( const rpc::chain::get_head_info_request& );
@@ -389,10 +392,15 @@ apply_block_result controller_impl::apply_block( const protocol::block& block, c
                    timestamp_out_of_bounds_exception,
                    "block timestamp is too old" );
 
-    KOINOS_ASSERT( block.header().previous_state_merkle_root()
-                     == util::converter::as< std::string >( parent_node->merkle_root() ),
-                   state_merkle_mismatch_exception,
-                   "block previous state merkle mismatch" );
+    {
+      auto parent_root = util::converter::as< std::string >( parent_node->merkle_root() );
+      KOINOS_ASSERT( block.header().previous_state_merkle_root() == parent_root
+                       || acceptable_rectified_previous_root( block.header().previous(),
+                                                              parent_root,
+                                                              block.header().previous_state_merkle_root() ),
+                     state_merkle_mismatch_exception,
+                     "block previous state merkle mismatch" );
+    }
 
     ctx.push_frame( stack_frame{ .call_privilege = privilege::kernel_mode } );
 
@@ -631,9 +639,10 @@ apply_block_result controller_impl::apply_block( const protocol::block& block, c
   return res;
 }
 
-void controller_impl::apply_block_delta( const protocol::block& block,
+bool controller_impl::apply_block_delta( const protocol::block& block,
                                          const protocol::block_receipt& receipt,
-                                         uint64_t index_to )
+                                         uint64_t index_to,
+                                         const std::optional< std::string >& expected_root )
 {
   uint64_t index_message_interval                  = std::max( 10'000ull, index_to / 1'000ull );
   static constexpr std::chrono::seconds time_delta = std::chrono::seconds( 5 );
@@ -660,12 +669,27 @@ void controller_impl::apply_block_delta( const protocol::block& block,
                    pre_irreversibility_block_exception,
                    "block is prior to irreversibility" );
     KOINOS_ASSERT( block_id == root->id(), unknown_previous_block_exception, "unknown previous block" );
-    return; // Block is current LIB
+    return false; // Block is current LIB
+  }
+
+  // The header's previous state merkle root is the consensus-signed root of the
+  // parent block's delta. Replay must verify it like full execution does, or a
+  // divergence surfaces far from the block that caused it.
+  {
+    auto parent_root = util::converter::as< std::string >( parent_node->merkle_root() );
+    KOINOS_ASSERT( block.header().previous_state_merkle_root() == parent_root
+                     || acceptable_rectified_previous_root( block.header().previous(),
+                                                            parent_root,
+                                                            block.header().previous_state_merkle_root() ),
+                   state_merkle_mismatch_exception,
+                   "block previous state merkle mismatch" );
   }
 
   block_node = _db.create_writable_node( parent_id, block_id, block.header(), db_lock );
 
   execution_context ctx( _vm_backend, intent::block_application );
+
+  bool reexecute = false;
 
   try
   {
@@ -684,54 +708,100 @@ void controller_impl::apply_block_delta( const protocol::block& block,
       if( delta_entry.has_value() )
         block_node->put_object( object_space, delta_entry.key(), &delta_entry.value() );
       else
-        block_node->remove_object( object_space, delta_entry.key() );
+        // A remove entry in a serialized receipt is a committed part of the historical
+        // block delta. It must be preserved as a tombstone even when the key is absent
+        // from the parent state (key created and removed within the same block),
+        // otherwise the replayed state delta merkle root diverges from the receipt root.
+        block_node->remove_object_preserve_tombstone( object_space, delta_entry.key() );
     }
 
-    if( block_height % index_message_interval == 0 )
+    // All mainnet receipts to date carry an empty state merkle root, but if one is
+    // present the replayed delta must reproduce it exactly.
+    if( receipt.state_merkle_root().size() )
     {
-      auto progress = block_height / static_cast< double >( index_to ) * 100;
-      LOG( info ) << "Indexing chain (" << progress << "%) - Height: " << block_height << ", ID: " << block_id;
+      KOINOS_ASSERT( receipt.state_merkle_root()
+                       == util::converter::as< std::string >( block_node->pending_merkle_root() ),
+                     state_merkle_mismatch_exception,
+                     "replayed state delta merkle root does not match block receipt" );
     }
 
-    auto lib = system_call::get_last_irreversible_block( ctx );
-
-    try
+    // A recorded receipt delta is not always reproducible: the receipt may have
+    // lost entries (see maybe_rectify_state), or the signed root itself may be a
+    // known consensus scar (see acceptable_rectified_previous_root). When the
+    // caller knows the consensus-signed expectation for this block's root and the
+    // replayed delta does not reproduce it - directly or through a recorded
+    // rectification - discard the still-writable node and rebuild it by fully
+    // re-executing the block. Once the node is finalized this repair is
+    // impossible - the head node cannot be discarded.
+    if( expected_root
+        && *expected_root != util::converter::as< std::string >( block_node->pending_merkle_root() )
+        && !acceptable_rectified_previous_root(
+          block.id(),
+          util::converter::as< std::string >( block_node->pending_merkle_root() ),
+          *expected_root ) )
     {
-      // We need to finalize our node, checking if it is the new head block, update the cached head block,
-      // and advancing LIB as an atomic action or else we risk _db.get_head(), _cached_head_block, and
-      // LIB desyncing from each other
-      db_lock.reset();
+      LOG( warning ) << "delta_replay_fallback height=" << block_height << " id=" << block_id
+                     << " - replayed delta root does not match the consensus root signed in the"
+                        " next block header; re-executing block through full verification";
+
       block_node.reset();
       parent_node.reset();
       ctx.clear_state_node();
+      _db.discard_node( block_id, db_lock );
+      db_lock.reset();
 
-      auto unique_db_lock = _db.get_unique_lock();
-      _db.finalize_node( block_id, unique_db_lock );
-
-      if( block_id == _db.get_head( unique_db_lock )->id() )
-      {
-        std::unique_lock< std::shared_mutex > head_lock( _cached_head_block_mutex );
-        _cached_head_block = std::make_shared< protocol::block >( block );
-      }
-
-      if( lib > _db.get_root( unique_db_lock )->revision() )
-      {
-        auto lib_id = _db.get_node_at_revision( lib, block_id, unique_db_lock )->id();
-        _db.commit_node( lib_id, unique_db_lock );
-      }
-
-      unique_db_lock.reset();
-      db_lock    = _db.get_shared_lock();
-      block_node = _db.get_node( block_id, db_lock );
-      ctx.set_state_node( block_node );
+      // Re-execution happens after this try block so its errors propagate unwrapped
+      reexecute = true;
     }
-    catch( ... )
+
+    if( !reexecute )
     {
-      // If any exception is thrown, reset to the expected local state and then rethrow.
-      db_lock    = _db.get_shared_lock();
-      block_node = _db.get_node( block_id, db_lock );
-      ctx.set_state_node( block_node );
-      throw;
+      if( block_height % index_message_interval == 0 )
+      {
+        auto progress = block_height / static_cast< double >( index_to ) * 100;
+        LOG( info ) << "Indexing chain (" << progress << "%) - Height: " << block_height << ", ID: " << block_id;
+      }
+
+      auto lib = system_call::get_last_irreversible_block( ctx );
+
+      try
+      {
+        // We need to finalize our node, checking if it is the new head block, update the cached head block,
+        // and advancing LIB as an atomic action or else we risk _db.get_head(), _cached_head_block, and
+        // LIB desyncing from each other
+        db_lock.reset();
+        block_node.reset();
+        parent_node.reset();
+        ctx.clear_state_node();
+
+        auto unique_db_lock = _db.get_unique_lock();
+        _db.finalize_node( block_id, unique_db_lock );
+
+        if( block_id == _db.get_head( unique_db_lock )->id() )
+        {
+          std::unique_lock< std::shared_mutex > head_lock( _cached_head_block_mutex );
+          _cached_head_block = std::make_shared< protocol::block >( block );
+        }
+
+        if( lib > _db.get_root( unique_db_lock )->revision() )
+        {
+          auto lib_id = _db.get_node_at_revision( lib, block_id, unique_db_lock )->id();
+          _db.commit_node( lib_id, unique_db_lock );
+        }
+
+        unique_db_lock.reset();
+        db_lock    = _db.get_shared_lock();
+        block_node = _db.get_node( block_id, db_lock );
+        ctx.set_state_node( block_node );
+      }
+      catch( ... )
+      {
+        // If any exception is thrown, reset to the expected local state and then rethrow.
+        db_lock    = _db.get_shared_lock();
+        block_node = _db.get_node( block_id, db_lock );
+        ctx.set_state_node( block_node );
+        throw;
+      }
     }
 
     // It is NOT safe to use block_node after this point without checking it against null
@@ -777,6 +847,24 @@ void controller_impl::apply_block_delta( const protocol::block& block,
 
     throw;
   }
+
+  if( reexecute )
+  {
+    apply_block( block, apply_block_options{ index_to, std::chrono::system_clock::now(), false } );
+
+    // No retry loop: if full re-execution cannot reproduce the consensus root either,
+    // the divergence is genuine corruption and the sync must halt here.
+    auto reexec_lock     = _db.get_shared_lock();
+    auto reexecuted_node = _db.get_node( block_id, reexec_lock );
+    KOINOS_ASSERT( reexecuted_node,
+                   block_state_error_exception,
+                   "re-executed block node is missing after fallback" );
+    KOINOS_ASSERT( *expected_root == util::converter::as< std::string >( reexecuted_node->merkle_root() ),
+                   state_merkle_mismatch_exception,
+                   "re-executed block does not reproduce the consensus state merkle root" );
+  }
+
+  return reexecute;
 }
 
 rpc::chain::submit_transaction_response
@@ -1305,6 +1393,14 @@ void controller::apply_block_delta( const protocol::block& block,
                                     uint64_t index_to )
 {
   _my->apply_block_delta( block, receipt, index_to );
+}
+
+bool controller::apply_block_delta_checked( const protocol::block& block,
+                                            const protocol::block_receipt& receipt,
+                                            const std::string& expected_root,
+                                            uint64_t index_to )
+{
+  return _my->apply_block_delta( block, receipt, index_to, expected_root );
 }
 
 rpc::chain::propose_block_response controller::propose_block( const rpc::chain::propose_block_request& request,

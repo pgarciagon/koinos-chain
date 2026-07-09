@@ -43,6 +43,12 @@ public:
                 uint64_t index_to                         = 0,
                 std::chrono::system_clock::time_point now = std::chrono::system_clock::now() );
   void apply_block_delta( const protocol::block&, const protocol::block_receipt&, uint64_t index_to );
+  // Returns true if the delta could not reproduce expected_root and the block
+  // was rebuilt through full re-execution
+  bool apply_block_delta_checked( const protocol::block&,
+                                  const protocol::block_receipt&,
+                                  const std::string& expected_root,
+                                  uint64_t index_to );
   rpc::chain::propose_block_response
   propose_block( const rpc::chain::propose_block_request&,
                  uint64_t index_to                         = 0,
